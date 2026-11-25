@@ -1,0 +1,532 @@
+# License: AGPL-3.0-only (LICENSE).
+# =============================================================================
+# GlucoCraft LED Christmas tree — core (required)
+#
+# An LED strip that shows GlucoCraft's data: with Glucose Mode on, the band of the
+# current zone in that zone's color from GlucoCraft's display colors. Very low and
+# very high light the whole strip. Without a current reading (as GlucoCraft defines
+# it, or when the tree's own clock finds the last reading older than GlucoCraft's
+# limit) no band is shown: the strip shows its decoration colors only.
+# Everything comes from GlucoCraft's entities; nothing here works out a zone.
+#
+# The device file sets these substitutions:
+#   led_pin, led_count, led_chipset (WS2812, SK6812, ...), led_channels (RGB, GRB, ...)
+# Entity names: Home Assistant identifies ESPHome entities by these names, so a
+# name changed later becomes a new entity in Home Assistant.
+# =============================================================================
+
+esphome:
+  includes:
+    - glucocraft_tree.h
+  on_boot:
+    - priority: -100
+      then:
+        - globals.set:
+            id: booted
+            value: 'true'
+        - lambda: 'id(scheme_color) = (id(color_scheme).current_option() == "Color");'
+        - script.execute: update_tree_colors
+        - script.execute: sync_outputs
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# =============================================================================
+# GlucoCraft entities (internal; read from Home Assistant)
+# =============================================================================
+text_sensor:
+  - platform: homeassistant
+    id: gc_zone
+    entity_id: sensor.glucocraft_last_glucose_reading
+    attribute: zone
+    internal: true
+    on_value:
+      - script.execute: update_tree_colors
+
+  - platform: homeassistant
+    id: gc_zone_color
+    entity_id: sensor.glucocraft_last_glucose_reading
+    attribute: zone_color
+    internal: true
+    on_value:
+      - script.execute: update_tree_colors
+
+  # Epoch seconds of the last reading, kept as text (a float would lose about two minutes).
+  - platform: homeassistant
+    id: gc_last_ts
+    entity_id: sensor.glucocraft_last_reading_time
+    attribute: last_reading_ts
+    internal: true
+
+  # GlucoCraft's display colors for all seven zones (used by Demo).
+  - platform: homeassistant
+    id: gc_zone_colors
+    entity_id: sensor.glucocraft_configuration
+    attribute: zone_colors
+    internal: true
+    on_value:
+      - lambda: 'gct::parse_zone_map(x, id(zone_rgb));'
+
+sensor:
+  - platform: homeassistant
+    id: gc_threshold_min
+    entity_id: binary_sensor.glucocraft_no_current_data
+    attribute: threshold_minutes
+    internal: true
+
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+    update_interval: 5min
+
+  # Minutes since GlucoCraft's last reading, by the tree's own clock.
+  - platform: template
+    name: "Glucose Data Age"
+    id: glucose_age
+    unit_of_measurement: "min"
+    accuracy_decimals: 1
+    update_interval: 60s
+    lambda: |-
+      const double age = gct::minutes_since(id(gc_last_ts).state, id(ha_time).now());
+      return std::isnan(age) ? NAN : (float) std::max(0.0, age);
+
+binary_sensor:
+  - platform: homeassistant
+    id: gc_no_current_data
+    entity_id: binary_sensor.glucocraft_no_current_data
+    internal: true
+
+  - platform: homeassistant
+    id: gc_warm_up
+    entity_id: binary_sensor.glucocraft_sensor_warm_up
+    internal: true
+
+  - platform: status
+    name: "Status"
+    entity_category: diagnostic
+
+  # On while GlucoCraft has a current reading: not "no current data", not warming up,
+  # a zone present, and the last reading within GlucoCraft's limit by the tree's own
+  # clock (this also covers Home Assistant or the connection being down).
+  - platform: template
+    name: "Glucose Data Valid"
+    id: glucose_data_valid
+    device_class: connectivity
+    lambda: |-
+      if (!id(gc_no_current_data).has_state() || id(gc_no_current_data).state) return false;
+      if (id(gc_warm_up).has_state() && id(gc_warm_up).state) return false;
+      if (gct::zone_index(id(gc_zone).state) < 0) return false;
+      const double age = gct::minutes_since(id(gc_last_ts).state, id(ha_time).now());
+      const float limit = std::isnan(id(gc_threshold_min).state) ? 15.0f : id(gc_threshold_min).state;
+      if (!std::isnan(age) && age > limit) return false;
+      return true;
+    on_state:
+      - script.execute: update_tree_colors
+
+# =============================================================================
+# State
+# =============================================================================
+globals:
+  - id: booted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: glucose_base
+    type: std::vector<esphome::Color>
+    restore_value: no
+    initial_value: 'std::vector<esphome::Color>(${led_count}, gct::rgb(gct::PALETTE_RGB[gct::WARM_WHITE]))'
+  - id: zone_now
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: zone_color_now
+    type: esphome::Color
+    restore_value: no
+    initial_value: 'esphome::Color(0, 0, 0)'
+  - id: zone_rgb
+    type: esphome::Color[7]
+    restore_value: no
+    initial_value: |-
+      { gct::rgb(gct::DEFAULT_ZONE_RGB[0]), gct::rgb(gct::DEFAULT_ZONE_RGB[1]),
+        gct::rgb(gct::DEFAULT_ZONE_RGB[2]), gct::rgb(gct::DEFAULT_ZONE_RGB[3]),
+        gct::rgb(gct::DEFAULT_ZONE_RGB[4]), gct::rgb(gct::DEFAULT_ZONE_RGB[5]),
+        gct::rgb(gct::DEFAULT_ZONE_RGB[6]) }
+  - id: scheme_color
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: demo_state
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: demo_effect
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+# =============================================================================
+# Controls
+# A template switch runs its actions before it records its new state; the 1 ms
+# delay lets the scripts see the new state.
+# =============================================================================
+switch:
+  - platform: template
+    name: "Tree Power"
+    id: tree_power_switch
+    icon: mdi:pine-tree
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - delay: 1ms
+      - script.execute: sync_outputs
+    turn_off_action:
+      - delay: 1ms
+      - script.execute: sync_outputs
+
+  - platform: template
+    name: "Glucose Mode"
+    id: glucose_mode
+    icon: mdi:water
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - delay: 1ms
+      - script.execute: update_tree_colors
+    turn_off_action:
+      - delay: 1ms
+      - script.execute: update_tree_colors
+
+  - platform: template
+    name: "Tree Demo"
+    id: demo_switch
+    icon: mdi:play-circle-outline
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - delay: 1ms
+      - globals.set:
+          id: demo_state
+          value: '0'
+      - script.execute: run_demo
+    turn_off_action:
+      - delay: 1ms
+      - globals.set:
+          id: demo_effect
+          value: '""'
+      - script.execute: update_tree_colors
+      - script.execute: apply_effect
+
+number:
+  - platform: template
+    name: "Tree Brightness"
+    id: tree_brightness
+    icon: mdi:brightness-6
+    entity_category: config
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 100
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Tree Effect Intensity"
+    id: effect_intensity_num
+    icon: mdi:tune-variant
+    entity_category: config
+    min_value: 1
+    max_value: 3
+    step: 1
+    initial_value: 2
+    optimistic: true
+    restore_value: true
+
+select:
+  - platform: template
+    name: "Tree Color Scheme"
+    id: color_scheme
+    icon: mdi:palette
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "White"
+      - "Color"
+    initial_option: "White"
+    on_value:
+      - lambda: 'id(scheme_color) = (x == "Color");'
+      - script.execute: update_tree_colors
+
+  - platform: template
+    name: "Tree Effect"
+    id: effect_select
+    icon: mdi:auto-fix
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "Solid"
+      - "Twinkle"
+      - "Shimmer"
+      - "Chase"
+      - "Wave"
+      - "Sparkle"
+    initial_option: "Solid"
+    on_value:
+      - script.execute: apply_effect
+
+# =============================================================================
+# Scripts
+# =============================================================================
+script:
+  # The strip follows Tree Power (after on_boot, so a restored state is applied once
+  # everything is set up).
+  - id: sync_outputs
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return id(booted);'
+          then:
+            - if:
+                condition:
+                  switch.is_on: tree_power_switch
+                then:
+                  - script.execute: apply_effect
+                else:
+                  - light.turn_off: led_strip
+
+  # Runs the selected effect (or Demo's), only when it is not already running.
+  - id: apply_effect
+    mode: restart
+    then:
+      - lambda: |-
+          if (!id(booted) || !id(tree_power_switch).state) return;
+          std::string eff = (id(demo_switch).state && !id(demo_effect).empty())
+                                ? id(demo_effect)
+                                : id(effect_select).current_option().str();
+          auto *ls = id(led_strip);
+          if (ls->remote_values.is_on() && ls->get_effect_name() == eff) return;
+          auto call = ls->turn_on();
+          call.set_effect(eff.c_str(), eff.size());
+          call.perform();
+
+  # Base colors: the decoration scheme plus the current GlucoCraft zone.
+  - id: update_tree_colors
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(demo_switch).state) return;  // Demo paints its own steps
+          int zone = -1;
+          esphome::Color zc(0, 0, 0);
+          if (id(glucose_mode).state && id(glucose_data_valid).state) {
+            zone = gct::zone_index(id(gc_zone).state);
+            if (zone >= 0 && !gct::parse_hex_color(id(gc_zone_color).state, zc)) zc = id(zone_rgb)[zone];
+          }
+          gct::paint(id(glucose_base), id(scheme_color), zone, zc);
+          id(zone_now) = zone;
+          id(zone_color_now) = zc;
+
+  # Demo: with Glucose Mode on, steps through "no current reading" and the seven zones
+  # in GlucoCraft's display colors (up, then down), with a random effect each step.
+  # The Tree Effect select keeps its own value.
+  - id: run_demo
+    mode: restart
+    then:
+      - lambda: |-
+          if (!id(demo_switch).state) return;
+          static const char *const effects[6] = {"Solid", "Twinkle", "Shimmer", "Chase", "Wave", "Sparkle"};
+          id(demo_effect) = effects[esphome::random_uint32() % 6];
+          int zone = -1;
+          esphome::Color zc(0, 0, 0);
+          if (id(glucose_mode).state) {
+            int s = id(demo_state);
+            zone = (s > 7 ? 14 - s : s) - 1;  // -1 = no current reading, 0..6 = zones
+            if (zone >= 0) zc = id(zone_rgb)[zone];
+            id(demo_state) = (s + 1) % 15;
+          }
+          gct::paint(id(glucose_base), id(scheme_color), zone, zc);
+          id(zone_now) = zone;
+          id(zone_color_now) = zc;
+      - script.execute: apply_effect
+
+interval:
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            switch.is_on: demo_switch
+          then:
+            - script.execute: run_demo
+
+  # Color scheme: one decoration LED changes color every 2 s (never one in the band,
+  # never a color that is easy to confuse with the zone's).
+  - interval: 2s
+    then:
+      - lambda: |-
+          if (!id(scheme_color) || id(demo_switch).state || !id(tree_power_switch).state) return;
+          const int n = id(glucose_base).size();
+          const int led = esphome::random_uint32() % n;
+          const int zone = id(zone_now);
+          if (zone >= 0 && gct::led_in_zone(zone, led, n)) return;
+          id(glucose_base)[led] = gct::pick_palette(zone >= 0, id(zone_color_now));
+
+# =============================================================================
+# LED strip. Every effect draws the base colors; with a band and the Color scheme,
+# the decoration LEDs outside the band run at half brightness.
+# =============================================================================
+light:
+  - platform: esp32_rmt_led_strip
+    chipset: ${led_chipset}
+    pin: ${led_pin}
+    num_leds: ${led_count}
+    channel_colors: ${led_channels}
+    id: led_strip
+    internal: true
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+    effects:
+      - addressable_lambda:
+          name: "Solid"
+          update_interval: 100ms
+          lambda: |-
+            const float brightness = id(tree_brightness).state / 100.0f;
+            const int zone = id(zone_now);
+            const bool dim_bg = zone >= 0 && id(scheme_color);
+            for (int i = 0; i < it.size(); i++) {
+              auto base = id(glucose_base)[i];
+              float b = brightness;
+              if (dim_bg && !gct::led_in_zone(zone, i, it.size())) b *= 0.5f;
+              it[i] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+
+      - addressable_lambda:
+          name: "Twinkle"
+          update_interval: 50ms
+          lambda: |-
+            const float brightness = id(tree_brightness).state / 100.0f;
+            const int zone = id(zone_now);
+            const bool dim_bg = zone >= 0 && id(scheme_color);
+            const int intensity = (int) id(effect_intensity_num).state;
+            const int twinkle_chance = (intensity == 1) ? 5 : (intensity == 2) ? 10 : 20;
+            const float twinkle_dim = (intensity == 1) ? 0.4f : (intensity == 2) ? 0.3f : 0.2f;
+            for (int i = 0; i < it.size(); i++) {
+              auto base = id(glucose_base)[i];
+              float b = brightness;
+              if (dim_bg && !gct::led_in_zone(zone, i, it.size())) b *= 0.5f;
+              it[i] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+            if ((int) (esphome::random_uint32() % 100) < twinkle_chance) {
+              int led = esphome::random_uint32() % it.size();
+              auto base = id(glucose_base)[led];
+              float b = brightness * twinkle_dim;
+              if (dim_bg && !gct::led_in_zone(zone, led, it.size())) b *= 0.5f;
+              it[led] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+
+      - addressable_lambda:
+          name: "Shimmer"
+          update_interval: 30ms
+          lambda: |-
+            static int shimmer_level = 230;
+            static int direction = -2;
+            const float brightness = id(tree_brightness).state / 100.0f;
+            const int zone = id(zone_now);
+            const bool dim_bg = zone >= 0 && id(scheme_color);
+            const int intensity = (int) id(effect_intensity_num).state;
+            const int min_level = (intensity == 1) ? 200 : (intensity == 2) ? 150 : 120;
+            const int speed = (intensity == 1) ? 2 : (intensity == 2) ? 3 : 4;
+            direction = (direction > 0) ? speed : -speed;
+            shimmer_level += direction;
+            if (shimmer_level <= min_level || shimmer_level >= 230) direction = -direction;
+            const float shimmer = shimmer_level / 255.0f;
+            for (int i = 0; i < it.size(); i++) {
+              auto base = id(glucose_base)[i];
+              float b = brightness * shimmer;
+              if (dim_bg && !gct::led_in_zone(zone, i, it.size())) b *= 0.5f;
+              it[i] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+
+      - addressable_lambda:
+          name: "Chase"
+          update_interval: 80ms
+          lambda: |-
+            static int position = 0;
+            static int frame_skip = 0;
+            const float brightness = id(tree_brightness).state / 100.0f;
+            const int zone = id(zone_now);
+            const bool dim_bg = zone >= 0 && id(scheme_color);
+            const int intensity = (int) id(effect_intensity_num).state;
+            const int chase_length = (intensity == 1) ? 2 : (intensity == 2) ? 3 : 4;
+            const float background_dim = (intensity == 1) ? 0.85f : (intensity == 2) ? 0.75f : 0.70f;
+            const int speed_divisor = (intensity == 1) ? 3 : (intensity == 2) ? 2 : 1;
+            for (int i = 0; i < it.size(); i++) {
+              auto base = id(glucose_base)[i];
+              float b = brightness * background_dim;
+              if (dim_bg && !gct::led_in_zone(zone, i, it.size())) b *= 0.5f;
+              it[i] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+            for (int k = 0; k < chase_length; k++) {
+              int idx = (position + k) % it.size();
+              auto base = id(glucose_base)[idx];
+              float b = brightness;
+              if (dim_bg && !gct::led_in_zone(zone, idx, it.size())) b *= 0.5f;
+              it[idx] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+            if (++frame_skip >= speed_divisor) {
+              frame_skip = 0;
+              position = (position + 1) % it.size();
+            }
+
+      - addressable_lambda:
+          name: "Wave"
+          update_interval: 50ms
+          lambda: |-
+            static float wave_position = 0;
+            const float brightness = id(tree_brightness).state / 100.0f;
+            const int zone = id(zone_now);
+            const bool dim_bg = zone >= 0 && id(scheme_color);
+            const int intensity = (int) id(effect_intensity_num).state;
+            const float wave_speed = (intensity == 1) ? 0.3f : (intensity == 2) ? 0.5f : 0.7f;
+            const float min_level = (intensity == 1) ? 0.6f : (intensity == 2) ? 0.5f : 0.4f;
+            const float wave_width = (intensity == 1) ? 20.0f : (intensity == 2) ? 15.0f : 12.0f;
+            for (int i = 0; i < it.size(); i++) {
+              float distance = fabsf(i - wave_position);
+              float level = std::max(min_level, 1.0f - (distance / wave_width));
+              auto base = id(glucose_base)[i];
+              float b = brightness * level;
+              if (dim_bg && !gct::led_in_zone(zone, i, it.size())) b *= 0.5f;
+              it[i] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+            wave_position += wave_speed;
+            if (wave_position >= it.size()) wave_position = 0;
+
+      - addressable_lambda:
+          name: "Sparkle"
+          update_interval: 80ms
+          lambda: |-
+            const float brightness = id(tree_brightness).state / 100.0f;
+            const int zone = id(zone_now);
+            const bool dim_bg = zone >= 0 && id(scheme_color);
+            const int intensity = (int) id(effect_intensity_num).state;
+            const int sparkle_count = (intensity == 1) ? 5 : (intensity == 2) ? 8 : 10;
+            const int sparkle_chance = (intensity == 1) ? 30 : 50;
+            const float background_dim = (intensity == 1) ? 0.85f : (intensity == 2) ? 0.75f : 0.70f;
+            for (int i = 0; i < it.size(); i++) {
+              auto base = id(glucose_base)[i];
+              float b = brightness * background_dim;
+              if (dim_bg && !gct::led_in_zone(zone, i, it.size())) b *= 0.5f;
+              it[i] = esphome::Color(base.r * b, base.g * b, base.b * b);
+            }
+            for (int s = 0; s < sparkle_count; s++) {
+              if ((int) (esphome::random_uint32() % 100) < sparkle_chance) {
+                int led = esphome::random_uint32() % it.size();
+                auto base = id(glucose_base)[led];
+                float b = brightness;
+                if (dim_bg && !gct::led_in_zone(zone, led, it.size())) b *= 0.5f;
+                it[led] = esphome::Color(base.r * b, base.g * b, base.b * b);
+              }
+            }

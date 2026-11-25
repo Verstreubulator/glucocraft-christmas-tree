@@ -1,0 +1,59 @@
+# License: AGPL-3.0-only (LICENSE).
+# =============================================================================
+# GlucoCraft LED Christmas tree — example device file
+#
+# Copy this file, change the substitutions to match the hardware, put the secrets
+# in secrets.yaml (see secrets.yaml.example) and remove the optional packages that
+# are not used. Pins below are for a Seeed Studio XIAO ESP32-C6; any ESP32 board
+# that ESPHome supports works with its own pins.
+# =============================================================================
+substitutions:
+  name: christmas-tree
+  friendly_name: Christmas Tree
+  led_pin: GPIO18
+  led_count: "50"
+  led_chipset: WS2812
+  led_channels: RGB          # the strip's color order: RGB, GRB, ...
+  sda_pin: GPIO22            # I2C, for the optional screen and sensor
+  scl_pin: GPIO23
+  display_address: "0x3C"
+  bme280_address: "0x77"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: seeed_xiao_esp32c6
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret tree_api_encryption_key
+
+ota:
+  - platform: esphome
+    encryption:              # empty = uses the api encryption key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret tree_fallback_ap_password
+
+captive_portal:
+
+i2c:
+  sda: ${sda_pin}
+  scl: ${scl_pin}
+  frequency: 400kHz
+
+packages:
+  core: !include packages/core.yaml                      # required
+  display: !include packages/display.yaml                # optional: 128 x 64 screen
+  enclosure: !include packages/enclosure-bme280.yaml     # optional: BME280 in the box

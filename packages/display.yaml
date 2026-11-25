@@ -1,0 +1,389 @@
+# License: AGPL-3.0-only (LICENSE).
+# =============================================================================
+# GlucoCraft LED Christmas tree — optional 128 x 64 screen (SSD1306 on I2C)
+#
+# Needs packages/core.yaml and an `i2c:` bus in the device file.
+# Display Mode:
+#   Glucose — TREND (an arrow at GlucoCraft's trend angle) · NOW (the value in
+#             GlucoCraft's display unit, or LO / HI) · 5-MIN (GlucoCraft's 5-minute
+#             delta), then GlucoCraft's word for the zone (shown inverted for very
+#             low, low, high and very high). Without a current reading: no value,
+#             and "NO CURRENT DATA" or "SENSOR WARMING UP".
+#   Message — holiday messages from two days before US Thanksgiving to January 6
+#             ({Y} = the current year), a greeting at other times.
+#   Off     — screen dark.
+# Header: time and date. Footer: "Updated Nm", the minutes since the last reading.
+# The colors on the strip do not name the zone; this screen shows the zone's name.
+# =============================================================================
+
+text_sensor:
+  - platform: homeassistant
+    id: gc_display_word
+    entity_id: sensor.glucocraft_last_glucose_reading
+    attribute: display_word
+    internal: true
+  - platform: homeassistant
+    id: gc_limit_text
+    entity_id: sensor.glucocraft_last_glucose_reading
+    attribute: limit_text
+    internal: true
+  - platform: homeassistant
+    id: gc_unit
+    entity_id: sensor.glucocraft_last_glucose_reading
+    attribute: unit
+    internal: true
+
+sensor:
+  - platform: homeassistant
+    id: gc_value
+    entity_id: sensor.glucocraft_last_glucose_reading
+    attribute: value_mgdl
+    internal: true
+  - platform: homeassistant
+    id: gc_delta
+    entity_id: sensor.glucocraft_5_minute_delta
+    attribute: value_mgdl
+    internal: true
+  # Degrees: 0 = level (arrow pointing right), up to +90 rising, down to -90 falling.
+  - platform: homeassistant
+    id: gc_trend_angle
+    entity_id: sensor.glucocraft_trend_arrow
+    attribute: angle
+    internal: true
+
+globals:
+  - id: current_message_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+select:
+  - platform: template
+    name: "Display Mode"
+    id: display_mode
+    icon: mdi:monitor
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - "Glucose"
+      - "Message"
+      - "Off"
+    initial_option: "Glucose"
+    on_value:
+      - component.update: oled_display
+
+interval:
+  - interval: 10min
+    then:
+      - lambda: 'id(current_message_index)++;'
+      - component.update: oled_display
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_tiny
+    size: 9
+    glyphs: &glyphs " !\"%()+,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'éèêàôïñáíóúäöüßìòù"
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 10
+    glyphs: *glyphs
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 12
+    glyphs: *glyphs
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 18
+    glyphs: *glyphs
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: ${display_address}
+    id: oled_display
+    update_interval: 1s
+    lambda: |-
+      // Keys: MMDD = a fixed date; TGm2, TGm1, TGp0 = two days before, the day before and the day of
+      // US Thanksgiving; ADVm3 ... ADVp1 = three days before to one day after the first Sunday of Advent.
+      static const char *const messages[][2] = {
+        {"TGm2", "Thanksgiving Soon!"},
+        {"TGm2", "Bon Thanksgiving!"},
+        {"TGm2", "Feliz Thanksgiving!"},
+        {"TGm2", "Frohes Erntedank!"},
+        {"TGm1", "Thanksgiving Eve!"},
+        {"TGm1", "Bon Thanksgiving!"},
+        {"TGm1", "Feliz Thanksgiving!"},
+        {"TGm1", "Erntedank Morgen!"},
+        {"TGp0", "Happy Thanksgiving!"},
+        {"TGp0", "Bon Thanksgiving!"},
+        {"TGp0", "Feliz Thanksgiving!"},
+        {"TGp0", "Erntedank!"},
+        {"1201", "Welcome December!"},
+        {"1201", "Bienvenue Decembre!"},
+        {"1201", "Hola Diciembre!"},
+        {"1201", "Willkommen Dezember!"},
+        {"ADVm3", "Advent Approaches!"},
+        {"ADVm3", "Avent Approche!"},
+        {"ADVm3", "Se Acerca Adviento!"},
+        {"ADVm3", "Advent Kommt!"},
+        {"ADVm2", "Advent is Near!"},
+        {"ADVm2", "Avent Proche!"},
+        {"ADVm2", "Adviento Cerca!"},
+        {"ADVm2", "Advent Naht!"},
+        {"ADVm1", "Advent Tomorrow!"},
+        {"ADVm1", "Avent Demain!"},
+        {"ADVm1", "Adviento Manana!"},
+        {"ADVm1", "Advent Morgen!"},
+        {"ADVp0", "First Advent!"},
+        {"ADVp0", "Premier Avent!"},
+        {"ADVp0", "Primer Adviento!"},
+        {"ADVp0", "Erster Advent!"},
+        {"ADVp1", "Christmas Comes!"},
+        {"ADVp1", "Noel Approche!"},
+        {"ADVp1", "Navidad Se Acerca!"},
+        {"ADVp1", "Weihnachten Naht!"},
+        {"1210", "Halfway to Xmas!"},
+        {"1210", "A Mi-Chemin!"},
+        {"1210", "A Medio Camino!"},
+        {"1210", "Halbzeit!"},
+        {"1215", "10 Days to Xmas!"},
+        {"1215", "10 Jours a Noel!"},
+        {"1215", "10 Dias a Navidad!"},
+        {"1215", "10 Tage bis Xmas!"},
+        {"1220", "5 Days to Xmas!"},
+        {"1220", "5 Jours a Noel!"},
+        {"1220", "5 Dias a Navidad!"},
+        {"1220", "5 Tage bis Xmas!"},
+        {"1221", "Winter Solstice!"},
+        {"1221", "Solstice Hiver!"},
+        {"1221", "Solsticio Invernal!"},
+        {"1221", "Wintersonnenwende!"},
+        {"1222", "Longest Night Past!"},
+        {"1222", "Nuit Plus Longue!"},
+        {"1222", "Noche Mas Larga!"},
+        {"1222", "Langste Nacht!"},
+        {"1223", "Christmas Eve Eve!"},
+        {"1223", "Veille de Veille!"},
+        {"1223", "Vispera Vispera!"},
+        {"1223", "Heiligabend Vorabend!"},
+        {"1224", "Merry Christmas Eve!"},
+        {"1224", "Joyeux Reveillon!"},
+        {"1224", "Feliz Nochebuena!"},
+        {"1224", "Frohe Heiligabend!"},
+        {"1225", "Merry Christmas!"},
+        {"1225", "Joyeux Noel!"},
+        {"1225", "Feliz Navidad!"},
+        {"1225", "Frohe Weihnachten!"},
+        {"1225", "Peace on Earth!"},
+        {"1225", "Paix sur Terre!"},
+        {"1225", "Paz en la Tierra!"},
+        {"1225", "Friede auf Erden!"},
+        {"1225", "Joy to the World!"},
+        {"1225", "Joie au Monde!"},
+        {"1225", "Alegria al Mundo!"},
+        {"1225", "Freude der Welt!"},
+        {"1225", "Christ is Born!"},
+        {"1225", "Christ est Ne!"},
+        {"1225", "Cristo ha Nacido!"},
+        {"1225", "Christus Geboren!"},
+        {"1226", "Happy Boxing Day!"},
+        {"1226", "Bon Lendemain Noel!"},
+        {"1226", "Feliz San Esteban!"},
+        {"1226", "Stefanitag!"},
+        {"1227", "Christmas Week!"},
+        {"1227", "Semaine de Noel!"},
+        {"1227", "Semana Navidad!"},
+        {"1227", "Weihnachtswoche!"},
+        {"1228", "New Year Approaches!"},
+        {"1228", "Nouvel An Approche!"},
+        {"1228", "Ano Nuevo Cerca!"},
+        {"1228", "Neujahr Naht!"},
+        {"1229", "3 Days to New Year!"},
+        {"1229", "3 Jours Nouvel An!"},
+        {"1229", "3 Dias Ano Nuevo!"},
+        {"1229", "3 Tage Neujahr!"},
+        {"1230", "New Year Tomorrow!"},
+        {"1230", "Nouvel An Demain!"},
+        {"1230", "Ano Nuevo Manana!"},
+        {"1230", "Neujahr Morgen!"},
+        {"1231", "New Year's Eve!"},
+        {"1231", "Reveillon!"},
+        {"1231", "Fin de Ano!"},
+        {"1231", "Silvester!"},
+        {"1231", "Almost New Year!"},
+        {"1231", "Presque Nouvel An!"},
+        {"1231", "Casi Ano Nuevo!"},
+        {"1231", "Fast Neujahr!"},
+        {"1231", "Last Day of Year!"},
+        {"1231", "Dernier Jour Annee!"},
+        {"1231", "Ultimo Dia del Ano!"},
+        {"1231", "Letzter Tag!"},
+        {"1231", "Goodbye {Y}!"},
+        {"1231", "Au Revoir {Y}!"},
+        {"1231", "Adios {Y}!"},
+        {"1231", "Tschuss {Y}!"},
+        {"0101", "Happy New Year!"},
+        {"0101", "Bonne Annee!"},
+        {"0101", "Feliz Ano Nuevo!"},
+        {"0101", "Frohes Neues Jahr!"},
+        {"0101", "Welcome {Y}!"},
+        {"0101", "Bienvenue {Y}!"},
+        {"0101", "Bienvenido {Y}!"},
+        {"0101", "Willkommen {Y}!"},
+        {"0101", "First Day!"},
+        {"0101", "Premier Jour!"},
+        {"0101", "Primer Dia!"},
+        {"0101", "Erster Tag!"},
+        {"0101", "New Beginnings!"},
+        {"0101", "Nouveaux Debuts!"},
+        {"0101", "Nuevos Comienzos!"},
+        {"0101", "Neue Anfange!"},
+        {"0102", "Day Two of {Y}!"},
+        {"0102", "Deuxieme Jour!"},
+        {"0102", "Segundo Dia!"},
+        {"0102", "Zweiter Tag!"},
+        {"0103", "New Year Joy!"},
+        {"0103", "Joie Nouvel An!"},
+        {"0103", "Alegria Ano Nuevo!"},
+        {"0103", "Neujahrsfreude!"},
+        {"0104", "New Year Blessings!"},
+        {"0104", "Benedictions!"},
+        {"0104", "Bendiciones!"},
+        {"0104", "Segen!"},
+        {"0105", "Twelfth Night!"},
+        {"0105", "Douzieme Nuit!"},
+        {"0105", "Duodecima Noche!"},
+        {"0105", "Zwolfte Nacht!"},
+        {"0106", "Happy Epiphany!"},
+        {"0106", "Joyeuse Epiphanie!"},
+        {"0106", "Feliz Epifania!"},
+        {"0106", "Frohe Epiphanie!"},
+        {"0106", "Three Kings Day!"},
+        {"0106", "Jour des Rois!"},
+        {"0106", "Dia de Reyes!"},
+        {"0106", "Dreikonigstag!"},
+      };
+      static const int message_count = sizeof(messages) / sizeof(messages[0]);
+
+      if (!id(tree_power_switch).state) return;          // tree off = screen off
+      const std::string mode = id(display_mode).current_option().str();
+      if (mode == "Off") return;
+
+      auto time = id(ha_time).now();
+      if (!time.is_valid()) {
+        it.print(64, 28, id(font_medium), TextAlign::CENTER, "Waiting for time...");
+        return;
+      }
+      const int year = time.year, month = time.month, day = time.day_of_month, hour = time.hour;
+
+      // ---------- header: time and date ----------
+      static const char *const days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+      static const char *const months[] = {"", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+      it.printf(2, 0, id(font_small), "%d:%02d %s", hour % 12 == 0 ? 12 : hour % 12, time.minute,
+                hour >= 12 ? "PM" : "AM");
+      it.printf(126, 0, id(font_small), TextAlign::TOP_RIGHT, "%s, %s %d",
+                days[time.day_of_week - 1], months[month], day);
+      it.line(0, 11, 128, 11);
+
+      // ---------- footer: minutes since the last reading ----------
+      const bool current = id(glucose_data_valid).state;
+      if (current && !std::isnan(id(glucose_age).state)) {
+        it.printf(0, 54, id(font_tiny), TextAlign::TOP_LEFT, "Updated %.0fm", floorf(id(glucose_age).state));
+      }
+
+      // ---------- message mode ----------
+      if (mode == "Message") {
+        const int ord = gct::season_ord(month, day);
+        const int tg = gct::thanksgiving_ord(year);
+        const int adv = gct::first_advent_ord(year);
+        const bool in_season = (ord >= std::min(tg - 2, adv - 3)) || (month == 1 && day <= 6);
+        if (!in_season) {
+          const char *greeting = (hour >= 5 && hour < 12) ? "Good Morning!"
+                               : (hour >= 12 && hour < 17) ? "Good Afternoon!"
+                               : (hour >= 17 && hour < 21) ? "Good Evening!" : "Good Night!";
+          it.print(64, 32, id(font_medium), TextAlign::CENTER, greeting);
+          return;
+        }
+        char mmdd[8], tg_key[8] = "", adv_key[12] = "";
+        snprintf(mmdd, sizeof(mmdd), "%02d%02d", month, day);
+        if (ord - tg >= -2 && ord - tg <= 0) snprintf(tg_key, sizeof(tg_key), "TG%c%d", ord < tg ? 'm' : 'p', abs(ord - tg));
+        if (ord - adv >= -3 && ord - adv <= 1) snprintf(adv_key, sizeof(adv_key), "ADV%c%d", ord < adv ? 'm' : 'p', abs(ord - adv));
+        std::vector<int> today;
+        for (int i = 0; i < message_count; i++) {
+          const char *k = messages[i][0];
+          if (strcmp(k, mmdd) == 0 || strcmp(k, tg_key) == 0 || strcmp(k, adv_key) == 0) today.push_back(i);
+        }
+        if (today.empty()) {
+          it.print(64, 32, id(font_medium), TextAlign::CENTER, "Happy Holidays!");
+        } else {
+          const int pick = today[id(current_message_index) % today.size()];
+          it.print(64, 32, id(font_medium), TextAlign::CENTER, gct::with_year(messages[pick][1], year).c_str());
+        }
+        return;
+      }
+
+      // ---------- glucose mode ----------
+      it.print(21, 14, id(font_tiny), TextAlign::TOP_CENTER, "TREND");
+      it.print(64, 14, id(font_tiny), TextAlign::TOP_CENTER, "NOW");
+      it.print(107, 14, id(font_tiny), TextAlign::TOP_CENTER, "5-MIN");
+      if (!current) {
+        it.print(21, 31, id(font_medium), TextAlign::CENTER, "---");
+        it.print(64, 21, id(font_large), TextAlign::TOP_CENTER, "---");
+        it.print(107, 31, id(font_medium), TextAlign::CENTER, "---");
+        it.filled_rectangle(8, 38, 112, 14, COLOR_ON);
+        const bool warm = id(gc_warm_up).has_state() && id(gc_warm_up).state;
+        it.print(64, 45, id(font_small), COLOR_OFF, TextAlign::CENTER, warm ? "SENSOR WARMING UP" : "NO CURRENT DATA");
+        return;
+      }
+      const bool mmol = id(gc_unit).state == "mmol/L";
+
+      // TREND: an arrow at GlucoCraft's angle (centre y 31, clear of the label above)
+      const float angle = id(gc_trend_angle).state;
+      if (std::isnan(angle)) {
+        it.print(21, 31, id(font_medium), TextAlign::CENTER, "--");
+      } else {
+        const float a = angle * (float) M_PI / 180.0f;
+        const int cx = 21, cy = 31, half = 6;
+        const int x1 = cx - cosf(a) * half, y1 = cy + sinf(a) * half;
+        const int x2 = cx + cosf(a) * half, y2 = cy - sinf(a) * half;
+        it.line(x1, y1, x2, y2);
+        it.line(x1, y1 + 1, x2, y2 + 1);
+        for (int side = -1; side <= 1; side += 2) {
+          const float h_a = a + (float) M_PI + side * 0.6f;
+          it.line(x2, y2, x2 + cosf(h_a) * 4, y2 - sinf(h_a) * 4);
+        }
+      }
+
+      // NOW: the value in GlucoCraft's display unit, or LO / HI
+      const std::string limit = id(gc_limit_text).state;
+      const float v = id(gc_value).state;
+      if (limit == "LO" || limit == "HI") {
+        it.print(64, 21, id(font_large), TextAlign::TOP_CENTER, limit.c_str());
+      } else if (std::isnan(v)) {
+        it.print(64, 21, id(font_large), TextAlign::TOP_CENTER, "---");
+      } else if (mmol) {
+        it.printf(64, 21, id(font_large), TextAlign::TOP_CENTER, "%.1f", v / 18.016f);
+      } else {
+        it.printf(64, 21, id(font_large), TextAlign::TOP_CENTER, "%.0f", v);
+      }
+
+      // 5-MIN: GlucoCraft's 5-minute delta, centred at the arrow's height
+      const float d = id(gc_delta).state;
+      if (std::isnan(d)) {
+        it.print(107, 31, id(font_medium), TextAlign::CENTER, "---");
+      } else if (mmol) {
+        it.printf(107, 31, id(font_medium), TextAlign::CENTER, "%+.1f", d / 18.016f);
+      } else {
+        it.printf(107, 31, id(font_medium), TextAlign::CENTER, "%+.0f", d);
+      }
+
+      // GlucoCraft's word for the zone; inverted for very low, low, high and very high
+      const std::string word = id(gc_display_word).state;
+      if (gct::zone_out_of_range(gct::zone_index(id(gc_zone).state))) {
+        it.filled_rectangle(8, 39, 112, 11, COLOR_ON);
+        it.print(64, 40, id(font_tiny), COLOR_OFF, TextAlign::TOP_CENTER, word.c_str());
+      } else {
+        it.print(64, 40, id(font_tiny), TextAlign::TOP_CENTER, word.c_str());
+      }

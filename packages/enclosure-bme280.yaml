@@ -1,0 +1,24 @@
+# License: AGPL-3.0-only (LICENSE).
+# =============================================================================
+# GlucoCraft LED Christmas tree — optional enclosure sensor (BME280 on I2C)
+#
+# Temperature, humidity and air pressure inside the controller's box, shown in Home
+# Assistant only. Needs an `i2c:` bus in the device file. Home Assistant converts the
+# units to its own unit system.
+# =============================================================================
+sensor:
+  - platform: bme280_i2c
+    address: ${bme280_address}
+    update_interval: 120s
+    temperature:
+      name: "Enclosure Temperature"
+      oversampling: 16x
+      accuracy_decimals: 1
+    pressure:
+      name: "Enclosure Pressure"
+      oversampling: 16x
+      accuracy_decimals: 1
+    humidity:
+      name: "Enclosure Humidity"
+      oversampling: 16x
+      accuracy_decimals: 1
